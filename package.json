@@ -1,17 +1,74 @@
-{
-  "name": "openai-nim-proxy",
-  "version": "1.0.0",
-  "description": "OpenAI compatible proxy for NVIDIA NIM API",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "axios": "^1.6.0"
-  },
-  "engines": {
-    "node": "18.x"
-  }
-}
+import os
+import requests
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
+
+app = FastAPI(title="NVIDIA NIM to OpenAI Proxy")
+
+# NVIDIA NIM Base API URL
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+@app.get("/v1/models")
+async def list_models():
+    """Returns a dummy OpenAI-compatible models list for frontends that check models on setup."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "meta/llama-3.3-70b-instruct",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "nvidia"
+            },
+            {
+                "id": "deepseek-ai/deepseek-r1",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "nvidia"
+            }
+        ]
+    }
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request, authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    body = await request.json()
+    is_stream = body.get("stream", False)
+
+    # Forward request headers and payload to NVIDIA NIM
+    headers = {
+        "Authorization": authorization,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream" if is_stream else "application/json"
+    }
+
+    try:
+        response = requests.post(
+            f"{NVIDIA_BASE_URL}/chat/completions",
+            json=body,
+            headers=headers,
+            stream=is_stream
+        )
+
+        if is_stream:
+            def stream_generator():
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+
+            return StreamingResponse(
+                stream_generator(),
+                status_code=response.status_code,
+                media_type="text/event-stream"
+            )
+        else:
+            return response.json()
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
